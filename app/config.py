@@ -106,14 +106,14 @@ PREDICTION_PRECOMPUTE_INTERVAL_SECONDS = int(
 PREDICTION_LOCK_SCHEDULE_ENABLED = (
     os.getenv("PREDICTION_LOCK_SCHEDULE_ENABLED", "true").lower() == "true"
 )
-# Defaults target a post-close lock in exchange timezone (America/New_York):
-# regular session end ~23:59, plus buffer -> run at 00:30.
-PREDICTION_LOCK_SCHEDULE_HOUR = int(os.getenv("PREDICTION_LOCK_SCHEDULE_HOUR", "0"))
+# Defaults target a post-close lock in local timezone (Asia/Colombo):
+# ICE Brent session ends at 03:30 LKT; run at 08:00 LKT (4.5h after close).
+PREDICTION_LOCK_SCHEDULE_HOUR = int(os.getenv("PREDICTION_LOCK_SCHEDULE_HOUR", "8"))
 PREDICTION_LOCK_SCHEDULE_MINUTE = int(
-    os.getenv("PREDICTION_LOCK_SCHEDULE_MINUTE", "30")
+    os.getenv("PREDICTION_LOCK_SCHEDULE_MINUTE", "0")
 )
 PREDICTION_LOCK_SCHEDULE_TIMEZONE = os.getenv(
-    "PREDICTION_LOCK_SCHEDULE_TIMEZONE", "America/New_York"
+    "PREDICTION_LOCK_SCHEDULE_TIMEZONE", "Asia/Colombo"
 )
 PREDICTION_CLOSE_LOCK_BUFFER_MINUTES = int(
     os.getenv("PREDICTION_CLOSE_LOCK_BUFFER_MINUTES", "20")
