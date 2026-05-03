@@ -96,6 +96,14 @@ def _run_daily_scrape(target_date: str = None) -> Dict[str, Any]:
         result["error"] = str(e)
 
     result["completed_at"] = datetime.now().isoformat()
+
+    # Attach FinBERT timing snapshot from the most recent run
+    try:
+        from app.services.finbert_analyzer import get_finbert_timing
+        result["finbert_timing"] = get_finbert_timing()
+    except Exception:
+        result["finbert_timing"] = None
+
     _last_run = result
     return result
 

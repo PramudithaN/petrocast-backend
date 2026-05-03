@@ -15,7 +15,8 @@ INTEGRATION:
 """
 
 import logging
-from typing import List, Optional
+import time
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 import torch
 
@@ -28,6 +29,22 @@ _model = None
 _tokenizer = None
 _device = None
 _model_loaded = False
+
+# Timing store – updated on each cold load and each batch inference run
+_timing: Dict[str, Any] = {
+    "model_load_time_seconds": None,
+    "model_loaded_at": None,
+    "device": None,
+    "last_inference_run_at": None,
+    "last_inference_article_count": None,
+    "last_inference_total_seconds": None,
+    "last_inference_per_article_seconds": None,
+}
+
+
+def get_finbert_timing() -> Dict[str, Any]:
+    """Return a snapshot of the current FinBERT timing metrics."""
+    return dict(_timing)
 
 
 def load_sentiment_model():
@@ -55,6 +72,8 @@ def load_sentiment_model():
             "Downloading model from Hugging Face (this may take a few minutes on first run)..."
         )
 
+        _t0 = time.perf_counter()
+
         # Always pass an explicit revision for safer/reproducible model loads.
         _tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -70,8 +89,16 @@ def load_sentiment_model():
         _model.to(_device)
         _model.eval()
 
+        _load_seconds = time.perf_counter() - _t0
         _model_loaded = True
-        logger.info(f"FinBERT model loaded successfully on {_device}")
+
+        _timing["model_load_time_seconds"] = round(_load_seconds, 3)
+        _timing["model_loaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _timing["device"] = str(_device)
+
+        logger.info(
+            f"FinBERT model loaded successfully on {_device} in {_load_seconds:.3f}s"
+        )
 
         return _model, _tokenizer, _device
 
@@ -150,6 +177,7 @@ def analyze_batch_finbert(texts: List[str], batch_size: int = 16) -> List[float]
         return [0.0] * len(texts)
 
     all_scores = []
+    _inference_start = time.perf_counter()
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
@@ -185,6 +213,13 @@ def analyze_batch_finbert(texts: List[str], batch_size: int = 16) -> List[float]
         except Exception as e:
             logger.warning(f"Batch analysis failed for batch starting at {i}: {e}")
             all_scores.extend([0.0] * len(batch))
+
+    _inference_elapsed = time.perf_counter() - _inference_start
+    _n = len(texts)
+    _timing["last_inference_run_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _timing["last_inference_article_count"] = _n
+    _timing["last_inference_total_seconds"] = round(_inference_elapsed, 3)
+    _timing["last_inference_per_article_seconds"] = round(_inference_elapsed / _n, 4) if _n else None
 
     return all_scores
 

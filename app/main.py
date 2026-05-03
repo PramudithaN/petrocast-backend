@@ -1647,6 +1647,24 @@ async def scraper_status():
     return await run_in_threadpool(get_scheduler_status)
 
 
+@app.get("/finbert/metrics")
+async def finbert_metrics():
+    """
+    Return FinBERT performance metrics recorded during the last daily scrape run.
+
+    Fields:
+    - model_load_time_seconds: Cold-load duration (null if not yet loaded this process).
+    - model_loaded_at: UTC timestamp of when the model was loaded.
+    - device: 'cpu' or 'cuda'.
+    - last_inference_run_at: UTC timestamp of the most recent batch inference.
+    - last_inference_article_count: Number of articles processed in that run.
+    - last_inference_total_seconds: Total inference time for all articles.
+    - last_inference_per_article_seconds: Average per-article inference time.
+    """
+    from app.services.finbert_analyzer import get_finbert_timing
+    return await run_in_threadpool(get_finbert_timing)
+
+
 @app.post(
     "/scraper/run",
     responses={
