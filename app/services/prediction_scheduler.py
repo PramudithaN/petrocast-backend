@@ -20,7 +20,7 @@ from app.config import (
     PREDICTION_LOCK_SCHEDULE_MINUTE,
     PREDICTION_LOCK_SCHEDULE_TIMEZONE,
 )
-from app.database import add_bulk_prices, upsert_daily_prediction
+from app.database import add_bulk_prices, upsert_daily_prediction, get_prediction_for_date, get_prices
 from app.services.prediction import prediction_service
 from app.services.price_fetcher import (
     fetch_latest_prices,
@@ -302,3 +302,113 @@ def trigger_prediction_job_now() -> dict:
     except Exception as exc:
         logger.error("Manual daily prediction trigger failed: %s", exc, exc_info=True)
         return {"status": "failed", "error": str(exc)}
+
+
+def _backfill_one_day(pred_date_str: str, prices_df: pd.DataFrame) -> str:
+    """
+    Generate and store a locked prediction for a single past business day.
+
+    Args:
+        pred_date_str: YYYY-MM-DD prediction date to backfill.
+        prices_df: Full price DataFrame (tz-naive, sorted ascending).
+
+    Returns:
+        "saved", "skipped", or "no_prices".
+    """
+    if get_prediction_for_date(pred_date_str):
+        return "skipped"
+
+    prices_before = prices_df[prices_df["date"] < pd.Timestamp(pred_date_str)]
+    if prices_before.empty:
+        logger.warning("Backfill: no prices before %s — skipping", pred_date_str)
+        return "no_prices"
+
+    based_on_row = prices_before.iloc[-1]
+    based_on_date = pd.Timestamp(based_on_row["date"]).strftime("%Y-%m-%d")
+    based_on_price = float(based_on_row["price"])
+
+    model_prices = prices_df[prices_df["date"] <= pd.Timestamp(based_on_date)].copy()
+    model_prices = model_prices.sort_values("date").reset_index(drop=True)
+    if model_prices.empty:
+        return "no_prices"
+
+    forecasts = prediction_service.predict(prices=model_prices)
+
+    current_date = pd.to_datetime(based_on_date)
+    aligned: list = []
+    for forecast in forecasts:
+        current_date += pd.Timedelta(days=1)
+        while current_date.weekday() >= 5:
+            current_date += pd.Timedelta(days=1)
+        aligned.append({**forecast, "date": current_date.strftime("%Y-%m-%d")})
+
+    upsert_daily_prediction(
+        prediction_date=pred_date_str,
+        based_on_price_date=based_on_date,
+        based_on_price=based_on_price,
+        forecasts=aligned,
+        locked_at=datetime.now().isoformat(),
+    )
+    logger.info("Backfill: saved prediction for %s based_on=%s", pred_date_str, based_on_date)
+    return "saved"
+
+
+def backfill_missing_locked_predictions(max_days_back: int = 14) -> dict:
+    """
+    Retroactively generate locked predictions for each business day in the past
+    max_days_back days that has stored price data but no locked prediction.
+
+    This repairs gaps caused by the scheduler missing runs (e.g., HF Space sleeping).
+    Predictions for those days are generated using prices from the DB up to each
+    day's previous trading close, so the compare view can show accurate comparisons.
+
+    Returns:
+        Summary dict with backfilled, skipped, and error counts.
+    """
+    tz = ZoneInfo(PREDICTION_LOCK_SCHEDULE_TIMEZONE)
+    today = datetime.now(tz).date()
+
+    candidates = []
+    check = today - timedelta(days=1)
+    cutoff = today - timedelta(days=max_days_back)
+    while check >= cutoff:
+        if check.weekday() < 5:
+            candidates.append(check)
+        check -= timedelta(days=1)
+
+    if not candidates:
+        return {"status": "nothing_to_backfill", "backfilled": 0, "skipped": 0, "errors": []}
+
+    prices_df = get_prices(days=max_days_back + 60)
+    if prices_df.empty:
+        return {"status": "no_prices", "backfilled": 0, "skipped": 0, "errors": []}
+
+    prices_df["date"] = pd.to_datetime(prices_df["date"]).dt.tz_localize(None)
+    prices_df = prices_df.sort_values("date").reset_index(drop=True)
+
+    backfilled = 0
+    skipped = 0
+    errors: list = []
+
+    for pred_date in candidates:
+        pred_date_str = pred_date.strftime("%Y-%m-%d")
+        try:
+            result = _backfill_one_day(pred_date_str, prices_df)
+            if result == "saved":
+                backfilled += 1
+            elif result == "skipped":
+                skipped += 1
+        except Exception as exc:
+            logger.error("Backfill: prediction failed for %s: %s", pred_date_str, exc, exc_info=True)
+            errors.append({"date": pred_date_str, "error": str(exc)})
+
+    logger.info(
+        "Prediction backfill complete: backfilled=%d skipped=%d errors=%d",
+        backfilled, skipped, len(errors),
+    )
+    return {
+        "status": "completed",
+        "backfilled": backfilled,
+        "skipped": skipped,
+        "errors": errors,
+    }

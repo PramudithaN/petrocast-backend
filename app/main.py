@@ -62,6 +62,8 @@ from app.database import (
     get_latest_prediction_fan_chart,
     get_news_articles,
     get_recent_news_articles,
+    get_latest_price_date,
+    get_prediction_for_date,
 )
 from app.services.price_fetcher import (
     fetch_latest_prices,
@@ -78,6 +80,7 @@ from app.services.prediction_scheduler import (
     init_prediction_scheduler,
     shutdown_prediction_scheduler,
     trigger_prediction_job_now,
+    backfill_missing_locked_predictions,
 )
 from app.services.price_sync_scheduler import (
     init_price_sync_scheduler,
@@ -160,6 +163,46 @@ def _next_business_day(date_value: pd.Timestamp) -> pd.Timestamp:
     while next_date.weekday() >= 5:
         next_date += pd.Timedelta(days=1)
     return next_date
+
+
+def _trigger_startup_locked_prediction_if_missing() -> None:
+    """Generate today's locked prediction on startup if the scheduler missed its run."""
+    today_pred_key = _current_prediction_date_local()
+    existing = get_prediction_for_date(today_pred_key)
+    if not existing:
+        logger.info(
+            "Startup: no locked prediction for %s — triggering job now", today_pred_key
+        )
+        result = trigger_prediction_job_now()
+        logger.info("Startup locked prediction result: %s", result)
+    else:
+        logger.info(
+            "Startup: locked prediction for %s already present — skipping trigger",
+            today_pred_key,
+        )
+
+
+def _startup_prediction_backfill() -> None:
+    """Fill prediction gaps for past business days that were missed while space was asleep."""
+    result = backfill_missing_locked_predictions(max_days_back=14)
+    logger.info("Startup prediction backfill: %s", result)
+
+
+def _compare_refresh_if_stale() -> None:
+    """Sync prices and fill prediction gaps so the compare view is always current."""
+    latest_stored = get_latest_price_date()
+    today_str = date.today().isoformat()
+    if latest_stored is None or latest_stored < today_str:
+        logger.info(
+            "Compare: prices stale (latest=%s) — triggering price sync", latest_stored
+        )
+        trigger_price_sync_now()
+    # Backfill any business days that have prices but no prediction (scheduler gaps).
+    backfill_missing_locked_predictions(max_days_back=14)
+    today_pred_key = _current_prediction_date_local()
+    if not get_prediction_for_date(today_pred_key):
+        logger.info("Compare: no locked prediction for %s — triggering job", today_pred_key)
+        trigger_prediction_job_now()
 
 
 def _align_forecast_dates_to_last_price(
@@ -706,6 +749,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Price sync scheduler initialization failed: %s", e, exc_info=True)
 
+    # Startup prediction trigger: generate today's locked prediction if the scheduler
+    # missed its run (e.g., HF Space was sleeping at scheduled time).
+    try:
+        await run_in_threadpool(_trigger_startup_locked_prediction_if_missing)
+    except Exception as e:
+        logger.warning("Startup locked prediction trigger failed: %s", e, exc_info=True)
+
+    # Backfill: retroactively fill any business-day gaps in the predictions table
+    # so /predictions/compare can show all recent trading days.
+    try:
+        await run_in_threadpool(_startup_prediction_backfill)
+    except Exception as e:
+        logger.warning("Startup prediction backfill failed: %s", e, exc_info=True)
+
     # Initialize explainability scheduler (must run in async context, not threadpool)
     try:
         from app.services.explainability_scheduler import init_scheduler
@@ -1228,6 +1285,35 @@ async def admin_sync_prices():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post(
+    "/admin/predictions/backfill",
+    responses={
+        500: {
+            "model": ErrorResponse,
+            "description": "Server error during prediction backfill",
+        },
+    },
+    tags=["admin"],
+)
+async def admin_backfill_predictions(
+    max_days_back: Annotated[int, Query(ge=1, le=60)] = 14,
+):
+    """
+    Retroactively generate locked predictions for recent business days that were
+    missed while the space was sleeping (scheduler gap repair).
+
+    Safe to call multiple times — already-stored prediction dates are skipped.
+    """
+    try:
+        result = await run_in_threadpool(
+            partial(backfill_missing_locked_predictions, max_days_back=max_days_back)
+        )
+        return result
+    except Exception as e:
+        logger.error("Manual prediction backfill failed", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get(
     "/predict/upload-excel/template",
     responses={
@@ -1370,6 +1456,15 @@ async def compare_predictions_with_actuals(
                 status_code=400,
                 detail=INVALID_DATE_DETAIL,
             )
+
+    # Self-heal: refresh prices and locked prediction when querying up to today so
+    # the compare view always reflects the most recent trading days.
+    effective_end = end_date or date.today().isoformat()
+    if effective_end >= date.today().isoformat():
+        try:
+            await run_in_threadpool(_compare_refresh_if_stale)
+        except Exception as _sync_err:
+            logger.warning("Compare auto-sync failed (non-fatal): %s", _sync_err)
 
     try:
         comparison_data = await run_in_threadpool(
