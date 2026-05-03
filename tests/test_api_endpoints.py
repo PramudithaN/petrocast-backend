@@ -331,7 +331,7 @@ class TestPredictEndpoint:
                 "forecasted_return": 0.001 * i,
                 "horizon": i,
             }
-            for i in range(1, 15)
+            for i in range(1, 6)
         ]
         today = datetime.now().date()
         based_on_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -485,7 +485,7 @@ class TestUploadPredictionEndpoints:
                 }
             ],
             "upload_window": {
-                "lookback_days": 30,
+                "lookback_days": 21,
                 "window_start": "2026-02-17",
                 "window_end": "2026-03-18",
                 "uploaded_rows_used": 27,
@@ -656,13 +656,13 @@ class TestUploadPredictionEndpoints:
         assert "date must be in YYYY-MM-DD format" in detail
 
     def test_upload_predict_more_than_lookback_rows(self, test_client):
-        """Upload should reject files containing more than 30 rows."""
+        """Upload should reject files containing more than 21 rows."""
         too_many_df = pd.DataFrame(
             {
                 "date": pd.date_range(
-                    end=datetime.now(), periods=31, freq="D"
+                    end=datetime.now(), periods=22, freq="D"
                 ).strftime("%Y-%m-%d"),
-                "price": np.linspace(80, 85, 31),
+                "price": np.linspace(80, 85, 22),
             }
         )
         payload = self._excel_bytes_from_df(too_many_df)
@@ -679,7 +679,7 @@ class TestUploadPredictionEndpoints:
         )
 
         assert response.status_code == 400
-        assert "at most 30 days" in response.json()["detail"]
+        assert "at most 21 days" in response.json()["detail"]
 
     @patch("app.main.run_prediction_from_uploaded_excel")
     def test_upload_predict_allows_some_missing_prices(
@@ -701,7 +701,7 @@ class TestUploadPredictionEndpoints:
                 }
             ],
             "upload_window": {
-                "lookback_days": 30,
+                "lookback_days": 21,
                 "window_start": "2026-02-17",
                 "window_end": "2026-03-18",
                 "uploaded_rows_used": 2,

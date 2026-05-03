@@ -14,7 +14,7 @@ class MidFreqGRU(nn.Module):
     Architecture (from training):
     - GRU: input_size=n_features, hidden_size=64, num_layers=1
     - Dropout: 0.3
-    - Linear: 64 -> HORIZON (14)
+    - Linear: 64 -> HORIZON (5)
     """
 
     def __init__(
@@ -22,7 +22,7 @@ class MidFreqGRU(nn.Module):
         n_features: int,
         hidden_size: int = 64,
         dropout: float = 0.3,
-        horizon: int = 14,
+        horizon: int = 5,
     ):
         super().__init__()
         self.horizon = horizon
@@ -85,7 +85,7 @@ class SentimentGRU(nn.Module):
         n_sent: int,
         hidden: int = 64,
         dropout: float = 0.3,
-        horizon: int = 14,
+        horizon: int = 5,
     ):
         super().__init__()
         self.horizon = horizon

@@ -23,8 +23,8 @@ SENTIMENT_MODEL_DIR = (
 SENTIMENT_DECAY_LAMBDA = 0.3
 
 # Model configuration defaults (runtime artifacts override these values)
-LOOKBACK = 30
-HORIZON = 14
+LOOKBACK = 21
+HORIZON = 5
 
 # Feature definitions (must match training exactly)
 LAGS = [1, 2, 3, 5, 7, 10, 14]

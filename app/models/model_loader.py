@@ -266,11 +266,11 @@ class ModelArtifacts:
 
     @property
     def lookback(self) -> int:
-        return int(self.config.get("lookback", self.config.get("LOOKBACK", 30)))
+        return int(self.config.get("lookback", self.config.get("LOOKBACK", 21)))
 
     @property
     def horizon(self) -> int:
-        return int(self.config.get("horizon", self.config.get("HORIZON", 14)))
+        return int(self.config.get("horizon", self.config.get("HORIZON", 5)))
 
     @property
     def arima_order(self) -> tuple:

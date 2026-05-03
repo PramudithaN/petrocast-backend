@@ -20,28 +20,28 @@ class TestPredictionPipeline:
     ):
         """Test complete prediction pipeline from data fetch to forecast."""
         # Mock price data
-        dates = pd.date_range(end=datetime.now(), periods=30, freq="D")
+        dates = pd.date_range(end=datetime.now(), periods=21, freq="D")
         rng = np.random.default_rng(42)
         mock_prices.return_value = pd.DataFrame(
-            {"date": dates, "price": rng.uniform(70, 90, size=30)}
+            {"date": dates, "price": rng.uniform(70, 90, size=21)}
         )
 
         # Mock sentiment data
         mock_sentiment.return_value = pd.DataFrame(
             {
                 "date": dates,
-                "daily_sentiment": rng.uniform(-0.5, 0.5, size=30),
-                "news_volume": rng.integers(5, 20, size=30),
-                "log_news_volume": rng.uniform(1.5, 3.0, size=30),
-                "decayed_news_volume": rng.uniform(5, 15, size=30),
-                "high_news_regime": rng.integers(0, 2, size=30),
+                "daily_sentiment": rng.uniform(-0.5, 0.5, size=21),
+                "news_volume": rng.integers(5, 20, size=21),
+                "log_news_volume": rng.uniform(1.5, 3.0, size=21),
+                "decayed_news_volume": rng.uniform(5, 15, size=21),
+                "high_news_regime": rng.integers(0, 2, size=21),
             }
         )
 
         # Mock model artifacts
         mock_artifacts._loaded = True
-        mock_artifacts.lookback = 30
-        mock_artifacts.horizon = 14
+        mock_artifacts.lookback = 21
+        mock_artifacts.horizon = 5
 
         # Test will attempt full pipeline
         # May fail without real models, but tests the structure

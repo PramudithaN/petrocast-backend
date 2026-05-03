@@ -399,14 +399,14 @@ class TestFeatureEngineering:
         rng = np.random.default_rng(42)
         features_df = pd.DataFrame(
             {
-                "log_return": rng.standard_normal(30),
-                "volatility_5": rng.standard_normal(30),
-                "volatility_10": rng.standard_normal(30),
+                "log_return": rng.standard_normal(21),
+                "volatility_5": rng.standard_normal(21),
+                "volatility_10": rng.standard_normal(21),
             }
         )
 
         try:
-            result = prepare_mid_features(features_df, lookback=30)
+            result = prepare_mid_features(features_df, lookback=21)
             assert result is not None
         except Exception:
             # May fail without exact feature set, but test the call
@@ -423,7 +423,7 @@ class TestFeatureEngineering:
         )
 
         try:
-            result = prepare_sentiment_features(sample_sentiment_df, lookback=30)
+            result = prepare_sentiment_features(sample_sentiment_df, lookback=21)
             assert result is not None
         except Exception:
             # May fail without exact feature set

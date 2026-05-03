@@ -1826,7 +1826,7 @@ def _collect_relative_errors_by_horizon(
             target_date, pred_entry = parsed
             actual_price = actual_price_by_date.get(target_date)
             predicted_price = float(pred_entry.get("forecasted_price", 0.0))
-            horizon = int(pred_entry.get("horizon", 14))
+            horizon = int(pred_entry.get("horizon", 5))
 
             if actual_price is None or predicted_price <= 0:
                 continue
@@ -1848,7 +1848,7 @@ def _calibration_pool_for_horizon(
         return direct
 
     pooled = list(direct)
-    max_h = 14
+    max_h = 5
     for radius in range(1, max_h):
         left = horizon - radius
         right = horizon + radius
@@ -1921,7 +1921,7 @@ def get_latest_prediction_fan_chart(
 
     for item in latest_forecasts:
         date_str = str(item.get("date"))
-        horizon = int(item.get("horizon", 14))
+        horizon = int(item.get("horizon", 5))
         point_forecast = float(item.get("forecasted_price", 0.0))
         model_lower = item.get("lower_bound")
         model_upper = item.get("upper_bound")
@@ -2075,7 +2075,7 @@ def _parse_single_forecast_observation(
     try:
         horizon = int(forecast.get("horizon"))
     except (TypeError, ValueError):
-        horizon = 14
+        horizon = 5
 
     lower_bound = _safe_float(forecast.get("lower_bound"))
     upper_bound = _safe_float(forecast.get("upper_bound"))

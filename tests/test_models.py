@@ -16,8 +16,8 @@ class TestModelLoader:
         from app.models.model_loader import ModelArtifacts
 
         artifacts = ModelArtifacts()
-        assert artifacts.lookback == 30
-        assert artifacts.horizon == 14
+        assert artifacts.lookback == 21
+        assert artifacts.horizon == 5
         assert artifacts._loaded is False
 
     @patch("torch.load")
@@ -70,7 +70,7 @@ class TestGRUModels:
         """Test Mid-GRU model structure."""
         from app.models.gru_models import MidFreqGRU
 
-        model = MidFreqGRU(n_features=10, hidden_size=64, dropout=0.3, horizon=14)
+        model = MidFreqGRU(n_features=10, hidden_size=64, dropout=0.3, horizon=5)
 
         assert model
         assert hasattr(model, "gru")
@@ -80,7 +80,7 @@ class TestGRUModels:
         """Test Sent-GRU model structure."""
         from app.models.gru_models import SentimentGRU
 
-        model = SentimentGRU(n_price=10, n_sent=5, hidden=64, dropout=0.3, horizon=14)
+        model = SentimentGRU(n_price=10, n_sent=5, hidden=64, dropout=0.3, horizon=5)
 
         assert model
         assert hasattr(model, "price_gru")
@@ -91,40 +91,40 @@ class TestGRUModels:
         """Test Mid-GRU forward pass."""
         from app.models.gru_models import MidFreqGRU
 
-        model = MidFreqGRU(n_features=10, hidden_size=64, dropout=0.3, horizon=14)
+        model = MidFreqGRU(n_features=10, hidden_size=64, dropout=0.3, horizon=5)
         model.eval()
 
-        # Create dummy input (batch_size=1, seq_len=30, features=10)
-        x = torch.randn(1, 30, 10)
+        # Create dummy input (batch_size=1, seq_len=21, features=10)
+        x = torch.randn(1, 21, 10)
 
         with torch.no_grad():
             output = model(x)
 
         # Output should be (batch_size, horizon)
-        assert output.shape == (1, 14)
+        assert output.shape == (1, 5)
 
     def test_sent_gru_forward_pass(self):
         """Test Sent-GRU forward pass."""
         from app.models.gru_models import SentimentGRU
 
-        model = SentimentGRU(n_price=10, n_sent=5, hidden=64, dropout=0.3, horizon=14)
+        model = SentimentGRU(n_price=10, n_sent=5, hidden=64, dropout=0.3, horizon=5)
         model.eval()
 
         # Create dummy inputs
-        xp = torch.randn(1, 30, 10)  # price features
-        xs = torch.randn(1, 30, 5)  # sentiment features
+        xp = torch.randn(1, 21, 10)  # price features
+        xs = torch.randn(1, 21, 5)  # sentiment features
 
         with torch.no_grad():
             output = model(xp, xs)
 
         # Output should be (batch_size, horizon)
-        assert output.shape == (1, 14)
+        assert output.shape == (1, 5)
 
     def test_model_parameters(self):
         """Test model has trainable parameters."""
         from app.models.gru_models import MidFreqGRU
 
-        model = MidFreqGRU(n_features=10, hidden_size=64, dropout=0.3, horizon=14)
+        model = MidFreqGRU(n_features=10, hidden_size=64, dropout=0.3, horizon=5)
 
         params = list(model.parameters())
         assert len(params) > 0
@@ -142,7 +142,7 @@ class TestModelInference:
         from app.models.gru_models import MidFreqGRU
 
         # Create a real model for testing
-        model = MidFreqGRU(n_features=10, hidden_size=64, dropout=0.3, horizon=14)
+        model = MidFreqGRU(n_features=10, hidden_size=64, dropout=0.3, horizon=5)
         model.eval()
 
         # Mock the artifacts
@@ -150,14 +150,14 @@ class TestModelInference:
         mock_artifacts.device = "cpu"
 
         # Create dummy input
-        x = torch.randn(1, 30, 10)
+        x = torch.randn(1, 21, 10)
 
         with torch.no_grad():
             output = model(x)
 
         assert output is not None
         assert isinstance(output, torch.Tensor)
-        assert output.shape == (1, 14)
+        assert output.shape == (1, 5)
 
     @patch("app.models.model_loader.model_artifacts")
     def test_sent_gru_inference(self, mock_artifacts):
@@ -165,7 +165,7 @@ class TestModelInference:
         from app.models.gru_models import SentimentGRU
 
         # Create a real model for testing
-        model = SentimentGRU(n_price=10, n_sent=5, hidden=64, dropout=0.3, horizon=14)
+        model = SentimentGRU(n_price=10, n_sent=5, hidden=64, dropout=0.3, horizon=5)
         model.eval()
 
         # Mock the artifacts
@@ -173,12 +173,12 @@ class TestModelInference:
         mock_artifacts.device = "cpu"
 
         # Create dummy inputs
-        xp = torch.randn(1, 30, 10)
-        xs = torch.randn(1, 30, 5)
+        xp = torch.randn(1, 21, 10)
+        xs = torch.randn(1, 21, 5)
 
         with torch.no_grad():
             output = model(xp, xs)
 
         assert output is not None
         assert isinstance(output, torch.Tensor)
-        assert output.shape == (1, 14)
+        assert output.shape == (1, 5)

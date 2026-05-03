@@ -1675,7 +1675,7 @@ RISK_NOTE:
         sentiment_story = (
             f"Sentiment had a net {sent_dir} impact of {sent_usd:+.4f} USD on the XGBoost model. "
             f"The Sentiment-GRU contributed {gru_sent:+.2f} USD, processing features including "
-            f"{top_sent_feat.replace('_', ' ')} across the 30-day lookback. "
+            f"{top_sent_feat.replace('_', ' ')} across the {LOOKBACK}-day lookback. "
             f"The attention mechanism peaked at t-{top_lag} days ago "
             f"(weight {top_attn_w:.4f})"
             + (

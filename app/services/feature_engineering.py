@@ -388,7 +388,7 @@ def get_hf_features() -> List[str]:
     ]
 
 
-def prepare_mid_features(df: pd.DataFrame, lookback: int = 30) -> np.ndarray:
+def prepare_mid_features(df: pd.DataFrame, lookback: int = 21) -> np.ndarray:
     """
     Prepare mid-frequency features for GRU input.
 
@@ -415,7 +415,7 @@ def prepare_mid_features(df: pd.DataFrame, lookback: int = 30) -> np.ndarray:
 
 
 def prepare_sentiment_features(
-    df: pd.DataFrame, lookback: int = 30
+    df: pd.DataFrame, lookback: int = 21
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Prepare price and sentiment features for Sentiment-GRU input.
