@@ -19,7 +19,7 @@ import pandas as pd
 import logging
 
 try:
-    import libsql_experimental as libsql
+    import libsql_experimental as libsql  # type: ignore
 
     _USE_EXPERIMENTAL_LIBSQL = True
 except ModuleNotFoundError:
@@ -2003,43 +2003,114 @@ def _parse_generated_date(generated_at_raw: Any) -> Optional[date]:
         return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
 
 
+def _extract_forecast_observation(
+    forecast: Dict[str, Any],
+    reference_date: date,
+    generated_at_raw: Any,
+    cutoff_date: date,
+) -> Optional[tuple]:
+    """Extract and validate a single forecast observation (low complexity helper)."""
+    target_date_raw = forecast.get("date")
+    pred_price_raw = forecast.get("forecasted_price")
+    
+    if target_date_raw is None or pred_price_raw is None:
+        return None
+    
+    try:
+        target_date = datetime.strptime(str(target_date_raw), "%Y-%m-%d").date()
+        pred_price = float(pred_price_raw)
+    except (ValueError, TypeError):
+        return None
+    
+    if target_date > cutoff_date or reference_date > target_date:
+        return None
+    
+    try:
+        horizon = max(1, int(forecast.get("horizon", 5)))
+    except (TypeError, ValueError):
+        horizon = 5
+    
+    lower_bound = forecast.get("lower_bound")
+    upper_bound = forecast.get("upper_bound")
+    
+    try:
+        lower_bound = float(lower_bound) if lower_bound is not None else None
+    except (ValueError, TypeError):
+        lower_bound = None
+    
+    try:
+        upper_bound = float(upper_bound) if upper_bound is not None else None
+    except (ValueError, TypeError):
+        upper_bound = None
+    
+    return target_date, {
+        "forecasted_price": pred_price,
+        "lower_bound": lower_bound,
+        "upper_bound": upper_bound,
+        "horizon": horizon,
+        "generated_at": str(generated_at_raw),
+    }
+
+
+def _process_prediction_run(
+    row: Any, cutoff_date: date
+) -> Optional[Dict[date, List[Dict[str, Any]]]]:
+    """Process a single prediction run (extracted for lower complexity)."""
+    generated_at_raw = row.get("generated_at")
+    reference_date = _parse_prediction_reference_date(
+        last_price_date_raw=row.get("last_price_date"),
+        generated_at_raw=generated_at_raw,
+    )
+    if reference_date is None:
+        return None
+
+    forecasts_blob = row.get("forecasts")
+    try:
+        forecasts = json.loads(forecasts_blob or "[]")
+        if not isinstance(forecasts, list):
+            forecasts = []
+    except Exception:
+        forecasts = []
+    
+    if not forecasts:
+        return None
+    
+    forecasts = _enrich_forecasts_with_missing_bounds(
+        forecasts=forecasts,
+        last_price_raw=row.get("last_price"),
+    )
+    
+    results: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
+    for forecast in forecasts:
+        observation = _extract_forecast_observation(
+            forecast=forecast,
+            reference_date=reference_date,
+            generated_at_raw=generated_at_raw,
+            cutoff_date=cutoff_date,
+        )
+        if observation is not None:
+            target_date, entry = observation
+            results[target_date].append(entry)
+    
+    return results if results else None
+
+
 def _collect_predictions_by_target_date(
     prediction_runs: pd.DataFrame, cutoff_date: date
 ) -> Dict[date, List[Dict[str, Any]]]:
     """Collect all valid prediction observations keyed by target date."""
-    per_date_predictions: Dict[date, List[Dict[str, Any]]] = {}
+    per_date_predictions: Dict[date, List[Dict[str, Any]]] = defaultdict(list)
 
     if prediction_runs.empty:
-        return per_date_predictions
-
+        return dict(per_date_predictions)
+    
     for _, row in prediction_runs.iterrows():
-        generated_at_raw = row.get("generated_at")
-        reference_date = _parse_prediction_reference_date(
-            last_price_date_raw=row.get("last_price_date"),
-            generated_at_raw=generated_at_raw,
-        )
-        if reference_date is None:
-            continue
+        run_predictions = _process_prediction_run(row, cutoff_date)
+        if run_predictions:
+            for target_date, entries in run_predictions.items():
+                per_date_predictions[target_date].extend(entries)
 
-        forecasts = _parse_forecasts_blob(row.get("forecasts"))
-        forecasts = _enrich_forecasts_with_missing_bounds(
-            forecasts=forecasts,
-            last_price_raw=row.get("last_price"),
-        )
-        for forecast in forecasts:
-            parsed = _parse_single_forecast_observation(
-                forecast=forecast,
-                reference_date=reference_date,
-                generated_at_raw=generated_at_raw,
-                cutoff_date=cutoff_date,
-            )
-            if parsed is None:
-                continue
-
-            target_date, prediction_entry = parsed
-            per_date_predictions.setdefault(target_date, []).append(prediction_entry)
-
-    return per_date_predictions
+    return dict(per_date_predictions)
 
 
 def _parse_forecasts_blob(forecasts_blob: Any) -> List[Dict[str, Any]]:
@@ -2110,68 +2181,90 @@ def _parse_prediction_reference_date(
 
 
 def _aggregate_predictions(preds: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate multiple predictions for a date."""
-    weights = [1.0 / float(p["horizon"]) for p in preds]
-    weighted_sum = sum(p["forecasted_price"] * w for p, w in zip(preds, weights))
-    total_weight = sum(weights)
+    """Aggregate multiple predictions for a date using optimized single-pass computation."""
+    n_preds = len(preds)
+    
+    # Single pass: compute all weighted values, collect prices for median, track latest
+    weighted_sum = 0.0
+    total_weight = 0.0
+    weighted_lower_sum = 0.0
+    weighted_lower_weight = 0.0
+    weighted_upper_sum = 0.0
+    weighted_upper_weight = 0.0
+    prices = []
+    latest_generated = ""
+    latest_price = 0.0
+    
+    for pred in preds:
+        horizon = pred.get("horizon", 5)
+        weight = 1.0 / float(horizon)
+        price = pred["forecasted_price"]
+        
+        # Weighted price
+        weighted_sum += price * weight
+        total_weight += weight
+        
+        # Bounds (only accumulate if present)
+        lower = pred.get("lower_bound")
+        if lower is not None:
+            weighted_lower_sum += float(lower) * weight
+            weighted_lower_weight += weight
+        
+        upper = pred.get("upper_bound")
+        if upper is not None:
+            weighted_upper_sum += float(upper) * weight
+            weighted_upper_weight += weight
+        
+        # For median
+        prices.append(price)
+        
+        # Track latest by generated_at
+        generated_at = pred.get("generated_at", "")
+        if generated_at > latest_generated:
+            latest_generated = generated_at
+            latest_price = price
+    
     weighted_predicted = weighted_sum / total_weight if total_weight > 0 else 0.0
-
-    lower_pairs = [
-        (float(p["lower_bound"]), w)
-        for p, w in zip(preds, weights)
-        if p.get("lower_bound") is not None
-    ]
-    upper_pairs = [
-        (float(p["upper_bound"]), w)
-        for p, w in zip(preds, weights)
-        if p.get("upper_bound") is not None
-    ]
-
-    weighted_lower = (
-        sum(v * w for v, w in lower_pairs) / sum(w for _, w in lower_pairs)
-        if lower_pairs
-        else None
-    )
-    weighted_upper = (
-        sum(v * w for v, w in upper_pairs) / sum(w for _, w in upper_pairs)
-        if upper_pairs
-        else None
-    )
-
-    sorted_prices = sorted(p["forecasted_price"] for p in preds)
-    n = len(sorted_prices)
-    if n % 2 == 1:
-        median_predicted = sorted_prices[n // 2]
+    weighted_lower = weighted_lower_sum / weighted_lower_weight if weighted_lower_weight > 0 else None
+    weighted_upper = weighted_upper_sum / weighted_upper_weight if weighted_upper_weight > 0 else None
+    
+    # Compute median
+    prices.sort()
+    if n_preds % 2 == 1:
+        median_predicted = prices[n_preds // 2]
     else:
-        median_predicted = (sorted_prices[n // 2 - 1] + sorted_prices[n // 2]) / 2.0
-
-    latest_pred_rec = max(preds, key=lambda p: p.get("generated_at", ""))
+        median_predicted = (prices[n_preds // 2 - 1] + prices[n_preds // 2]) / 2.0
 
     return {
         "weighted_predicted": weighted_predicted,
         "weighted_lower": weighted_lower,
         "weighted_upper": weighted_upper,
         "median_predicted": median_predicted,
-        "latest_predicted": float(latest_pred_rec["forecasted_price"]),
-        "prediction_count": len(preds),
+        "latest_predicted": latest_price,
+        "prediction_count": n_preds,
     }
 
 
 def _build_comparison_rows(
     actual_df: pd.DataFrame, per_date_predictions: Dict[date, List[Dict[str, Any]]]
 ) -> List[Dict[str, Any]]:
-    """Build day-level comparison rows for dates that have both actual and predicted values."""
+    """Build day-level comparison rows for dates that have both actual and predicted values (optimized)."""
     rows: List[Dict[str, Any]] = []
+    
+    # Pre-aggregate all predictions to avoid repeated aggregation
+    aggregated_by_date = {
+        target_date: _aggregate_predictions(preds)
+        for target_date, preds in per_date_predictions.items()
+    }
 
     for _, rec in actual_df.iterrows():
         target_date = rec["date"]
-        preds = per_date_predictions.get(target_date, [])
-        if not preds:
+        aggregated = aggregated_by_date.get(target_date)
+        
+        if aggregated is None:
             continue
 
         actual_price = float(rec["price"])
-        aggregated = _aggregate_predictions(preds)
-
         weighted_predicted = aggregated["weighted_predicted"]
         error = actual_price - weighted_predicted
         abs_error = abs(error)

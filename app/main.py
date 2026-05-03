@@ -251,6 +251,40 @@ def _ensure_prediction_background_refresh(persist_forecast: bool) -> None:
     _prediction_background_refresh_task = asyncio.create_task(_refresh_task_runner())
 
 
+def _scale_forecasts_by_live_price(
+    forecasts: list[dict], close_price: float, live_snapshot: dict
+) -> tuple[float, str, list[dict]]:
+    """Scale forecasts by live price ratio if available. Returns (last_price, last_date, scaled_forecasts)."""
+    if not live_snapshot or float(live_snapshot["price"]) <= 0:
+        return close_price, "", forecasts
+    
+    last_price = float(live_snapshot["price"])
+    last_date = str(live_snapshot["as_of_date"])
+    
+    if close_price <= 0:
+        return last_price, last_date, forecasts
+    
+    scale = last_price / close_price
+    scaled = [
+        {
+            **f,
+            "forecasted_price": round(float(f["forecasted_price"]) * scale, 2),
+            "lower_bound": (
+                round(float(f["lower_bound"]) * scale, 2)
+                if f.get("lower_bound") is not None
+                else None
+            ),
+            "upper_bound": (
+                round(float(f["upper_bound"]) * scale, 2)
+                if f.get("upper_bound") is not None
+                else None
+            ),
+        }
+        for f in forecasts
+    ]
+    return last_price, last_date, scaled
+
+
 async def _build_prediction_response(
     persist_forecast: bool = True,
 ) -> PredictionResponse:
@@ -270,31 +304,10 @@ async def _build_prediction_response(
     # Use intraday quote as current last known price when available,
     # but do not persist intraday rows into prices table.
     live_snapshot = await run_in_threadpool(fetch_live_price_snapshot)
-    if live_snapshot and float(live_snapshot["price"]) > 0:
-        last_price = float(live_snapshot["price"])
-        last_date = str(live_snapshot["as_of_date"])
-        if close_price > 0:
-            scale = last_price / close_price
-            forecasts = [
-                {
-                    **f,
-                    "forecasted_price": round(float(f["forecasted_price"]) * scale, 2),
-                    "lower_bound": (
-                        round(float(f["lower_bound"]) * scale, 2)
-                        if f.get("lower_bound") is not None
-                        else None
-                    ),
-                    "upper_bound": (
-                        round(float(f["upper_bound"]) * scale, 2)
-                        if f.get("upper_bound") is not None
-                        else None
-                    ),
-                }
-                for f in forecasts
-            ]
-    else:
-        last_price = close_price
-        last_date = close_date
+    last_price, last_date_raw, forecasts = _scale_forecasts_by_live_price(
+        forecasts, close_price, live_snapshot
+    )
+    last_date = last_date_raw if last_date_raw else close_date
 
     forecasts = _align_forecast_dates_to_last_price(forecasts, last_date)
 
@@ -1523,11 +1536,11 @@ async def compare_predictions_with_actuals(
         except Exception as _sync_err:
             logger.warning("Compare auto-sync failed (non-fatal): %s", _sync_err)
 
-        # Always pass a live Yahoo fetch as supplemental so dates not yet committed
-        # to Turso (replication lag, missed sync) still appear in the comparison.
+        # Fetch live prices only for recent trading days (7 days lookback for efficiency)
+        # to fill any gap caused by Turso replication lag or a missed price-sync run.
         try:
             supplemental_prices = await run_in_threadpool(
-                partial(fetch_latest_prices, lookback_days=30)
+                partial(fetch_latest_prices, lookback_days=7)
             )
         except Exception as _fetch_err:
             logger.warning("Compare supplemental price fetch failed (non-fatal): %s", _fetch_err)
