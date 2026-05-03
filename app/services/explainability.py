@@ -121,13 +121,63 @@ class ExplainabilityService:
             logger.info("Phi-3-mini LLM loaded successfully")
         return self._llm_pipeline
 
+    def _resolve_freshness_reference(self, prediction_date: str):
+        """Return the date to use as the price-freshness reference.
+
+        When a locked prediction exists its ``last_price_date`` reflects the
+        actual last trading day (e.g. Friday), not the calendar prediction date
+        (e.g. Sunday).  Using the locked date prevents weekend/holiday gaps from
+        being misread as stale data.
+        """
+        from app.services.prediction_snapshot import get_locked_prediction_snapshot
+
+        try:
+            snapshot = get_locked_prediction_snapshot(prediction_date=prediction_date)
+            if snapshot and snapshot.get("last_price_date"):
+                locked_ref = datetime.strptime(
+                    str(snapshot["last_price_date"]), "%Y-%m-%d"
+                ).date()
+                logger.info(
+                    "Using locked prediction last_price_date=%s as freshness reference "
+                    "(prediction_date=%s)",
+                    locked_ref,
+                    prediction_date,
+                )
+                return locked_ref
+        except Exception as snap_err:
+            logger.debug(
+                "Could not read locked snapshot for freshness reference: %s", snap_err
+            )
+        return datetime.strptime(prediction_date, "%Y-%m-%d").date()
+
+    @staticmethod
+    def _try_refresh_prices(add_bulk_prices, get_prices_db) -> pd.DataFrame:
+        """Attempt a live Yahoo Finance price fetch and upsert into the DB."""
+        from app.services.price_fetcher import fetch_latest_prices
+
+        live_prices = fetch_latest_prices(lookback_days=14)
+        records = [
+            {
+                "date": pd.to_datetime(row["date"]).strftime("%Y-%m-%d"),
+                "price": float(row["price"]),
+                "source": "yahoo_finance",
+            }
+            for row in live_prices[["date", "price"]].to_dict(orient="records")
+        ]
+        if records:
+            add_bulk_prices(records)
+        return get_prices_db(days=7)
+
     def _validate_prices_available_for_prediction_date(
         self, prediction_date: str
     ) -> bool:
         """
         Verify that price data is fresh enough for the canonical prediction date.
 
-        This prevents the daily job from running on stale/incomplete data.
+        If a locked prediction already exists for today, its ``last_price_date``
+        is used as the freshness reference instead of the calendar prediction date.
+        This correctly handles weekends and holidays where the last trading day
+        is 2+ calendar days behind today.
 
         Args:
             prediction_date: Canonical prediction date key (YYYY-MM-DD).
@@ -138,37 +188,21 @@ class ExplainabilityService:
         try:
             from app.database import add_bulk_prices, get_prices as get_prices_db
 
-            prediction_date_obj = datetime.strptime(prediction_date, "%Y-%m-%d").date()
+            reference_date_obj = self._resolve_freshness_reference(prediction_date)
 
-            def _days_behind_latest(prices_df: pd.DataFrame) -> Optional[int]:
+            def _days_behind(prices_df: pd.DataFrame) -> Optional[int]:
                 if prices_df is None or prices_df.empty:
                     return None
-                latest_price_date = pd.to_datetime(prices_df["date"].iloc[-1]).date()
-                return (prediction_date_obj - latest_price_date).days
+                return (reference_date_obj - pd.to_datetime(prices_df["date"].iloc[-1]).date()).days
 
             prices_df = get_prices_db(days=7)
-            days_behind = _days_behind_latest(prices_df)
+            days_behind = _days_behind(prices_df)
 
             # If DB is stale/missing, try live fetch + upsert before deferring.
             if days_behind is None or days_behind > 1:
                 try:
-                    from app.services.price_fetcher import fetch_latest_prices
-
-                    live_prices = fetch_latest_prices(lookback_days=14)
-                    records = [
-                        {
-                            "date": pd.to_datetime(row["date"]).strftime("%Y-%m-%d"),
-                            "price": float(row["price"]),
-                            "source": "yahoo_finance",
-                        }
-                        for row in live_prices[["date", "price"]].to_dict(
-                            orient="records"
-                        )
-                    ]
-                    if records:
-                        add_bulk_prices(records)
-                        prices_df = get_prices_db(days=7)
-                        days_behind = _days_behind_latest(prices_df)
+                    prices_df = self._try_refresh_prices(add_bulk_prices, get_prices_db)
+                    days_behind = _days_behind(prices_df)
                 except Exception as live_err:
                     logger.warning(
                         "Live price refresh failed during explainability validation: %s",
@@ -180,27 +214,19 @@ class ExplainabilityService:
                 return False
 
             latest_price_date = pd.to_datetime(prices_df["date"].iloc[-1]).date()
-            if days_behind == 0:
+            if days_behind <= 1:
                 logger.info(
-                    "Prices aligned for prediction_date=%s (latest=%s)",
-                    prediction_date,
-                    latest_price_date,
-                )
-                return True
-
-            if days_behind == 1:
-                logger.info(
-                    "Prices are 1 day behind prediction_date=%s (latest=%s). "
-                    "Still acceptable for stable-close workflow.",
-                    prediction_date,
+                    "Prices acceptable: %s day(s) behind reference_date=%s (latest=%s)",
+                    days_behind,
+                    reference_date_obj,
                     latest_price_date,
                 )
                 return True
 
             logger.error(
-                "Prices are %s days behind prediction_date=%s (latest=%s). Data too stale.",
+                "Prices are %s days behind reference_date=%s (latest=%s). Data too stale.",
                 days_behind,
-                prediction_date,
+                reference_date_obj,
                 latest_price_date,
             )
             return False
@@ -383,42 +409,41 @@ class ExplainabilityService:
         latest_prices = latest_prices.sort_values("date").reset_index(drop=True)
 
         prediction_key = current_prediction_date_local()
-        prediction_date_obj = datetime.strptime(prediction_key, "%Y-%m-%d").date()
 
-        # CRITICAL VALIDATION: Ensure latest price is fresh for canonical prediction date
+        # Use the same locked forecast source as `/predict` to keep values consistent.
+        # Fetch snapshot FIRST so we can use its last_price_date as the freshness
+        # reference — this correctly handles weekends/holidays where the calendar
+        # prediction_date is 2+ days ahead of the last market close.
+        snapshot = get_required_locked_prediction_snapshot(
+            prediction_date=prediction_key
+        )
+
+        # Freshness reference: locked prediction's last_price_date (actual last
+        # trading day) rather than today's calendar date.
+        reference_date_obj = self._resolve_freshness_reference(prediction_key)
+
         last_price_date = pd.to_datetime(latest_prices["date"].iloc[-1]).date()
-        days_behind = (prediction_date_obj - last_price_date).days
+        days_behind = (reference_date_obj - last_price_date).days
 
         if days_behind > 1:
             logger.warning(
-                "Last price date is %s days behind prediction_key=%s (latest=%s). "
+                "Last price date is %s days behind reference_date=%s (latest=%s). "
                 "Aborting explainability computation to prevent stale explanations.",
                 days_behind,
-                prediction_key,
+                reference_date_obj,
                 last_price_date,
             )
             raise ValueError(
-                f"Price data is too stale ({days_behind} days old). "
+                f"Price data is too stale ({days_behind} days old relative to locked "
+                f"prediction reference {reference_date_obj}). "
                 "Cannot generate reliable explanations on outdated data."
             )
 
         if days_behind == 1:
             logger.info(
-                "Last price date is 1 day behind prediction_key=%s (latest=%s). Proceeding.",
-                prediction_key,
+                "Last price date is 1 day behind reference_date=%s (latest=%s). Proceeding.",
+                reference_date_obj,
                 last_price_date,
-            )
-
-        # Use the same locked forecast source as `/predict` to keep values consistent.
-        snapshot = get_required_locked_prediction_snapshot(
-            prediction_date=prediction_key
-        )
-
-        snapshot_last_date = str(snapshot["last_price_date"])
-        if last_price_date < datetime.strptime(snapshot_last_date, "%Y-%m-%d").date():
-            raise ValueError(
-                "Price table is behind locked prediction reference date. "
-                f"latest_price_date={last_price_date}, snapshot_last_price_date={snapshot_last_date}"
             )
 
         prediction_result = {
