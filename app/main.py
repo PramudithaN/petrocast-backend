@@ -1315,6 +1315,62 @@ async def admin_backfill_predictions(
 
 
 @app.get(
+    "/admin/data-state",
+    responses={
+        500: {
+            "model": ErrorResponse,
+            "description": "Server error during data state check",
+        },
+    },
+    tags=["admin"],
+)
+async def admin_data_state():
+    """
+    Return a diagnostic snapshot of the DB data state and a live Yahoo price check.
+
+    Useful for debugging compare gaps: shows latest stored price date, latest
+    prediction date, and the most recent 7 trading days from Yahoo Finance live.
+    """
+    def _sync_data_state():
+        from app.services.price_fetcher import fetch_latest_prices as _fetch
+
+        state: dict = {}
+
+        # Latest price in DB
+        state["db_latest_price_date"] = get_latest_price_date()
+
+        # Latest locked prediction date in DB
+        try:
+            from app.database import get_latest_locked_prediction
+            latest_pred = get_latest_locked_prediction()
+            state["db_latest_prediction_date"] = (
+                latest_pred.get("prediction_date") or latest_pred.get("last_price_date")
+                if latest_pred else None
+            )
+        except Exception as exc:
+            state["db_latest_prediction_date"] = f"error: {exc}"
+
+        # Last 7 trading days from Yahoo Finance live
+        try:
+            live_df = _fetch(lookback_days=14)
+            recent = live_df.tail(7)[["date", "price"]].copy()
+            recent["date"] = pd.to_datetime(recent["date"]).dt.strftime("%Y-%m-%d")
+            state["yahoo_last_7_days"] = recent.to_dict(orient="records")
+            state["yahoo_latest_date"] = recent["date"].max()
+        except Exception as exc:
+            state["yahoo_last_7_days"] = []
+            state["yahoo_latest_date"] = f"error: {exc}"
+
+        return state
+
+    try:
+        return await run_in_threadpool(_sync_data_state)
+    except Exception as e:
+        logger.error("Data state check failed", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
     "/predict/upload-excel/template",
     responses={
         200: {
@@ -1460,11 +1516,21 @@ async def compare_predictions_with_actuals(
     # Self-heal: refresh prices and locked prediction when querying up to today so
     # the compare view always reflects the most recent trading days.
     effective_end = end_date or date.today().isoformat()
+    supplemental_prices = None
     if effective_end >= date.today().isoformat():
         try:
             await run_in_threadpool(_compare_refresh_if_stale)
         except Exception as _sync_err:
             logger.warning("Compare auto-sync failed (non-fatal): %s", _sync_err)
+
+        # Always pass a live Yahoo fetch as supplemental so dates not yet committed
+        # to Turso (replication lag, missed sync) still appear in the comparison.
+        try:
+            supplemental_prices = await run_in_threadpool(
+                partial(fetch_latest_prices, lookback_days=30)
+            )
+        except Exception as _fetch_err:
+            logger.warning("Compare supplemental price fetch failed (non-fatal): %s", _fetch_err)
 
     try:
         comparison_data = await run_in_threadpool(
@@ -1472,6 +1538,7 @@ async def compare_predictions_with_actuals(
                 get_actual_vs_predicted_until,
                 end_date=end_date,
                 start_date=start_date,
+                supplemental_prices=supplemental_prices,
             )
         )
 

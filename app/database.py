@@ -2233,9 +2233,42 @@ def _compute_comparison_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _merge_supplemental_prices(
+    actual_df: pd.DataFrame,
+    supplemental_prices: pd.DataFrame,
+    cutoff_date: "date",
+    start_bound: Optional["date"],
+) -> pd.DataFrame:
+    """
+    Merge a live-fetched price DataFrame into the DB-sourced actuals.
+
+    DB rows always win when a date exists in both sources.  Only rows within
+    [start_bound, cutoff_date] are included.
+    """
+    supp = supplemental_prices[["date", "price"]].copy()
+    supp["date"] = pd.to_datetime(supp["date"]).dt.strftime("%Y-%m-%d")
+    supp = supp[supp["date"] <= cutoff_date.strftime("%Y-%m-%d")]
+    if start_bound is not None:
+        supp = supp[supp["date"] >= start_bound.strftime("%Y-%m-%d")]
+    if supp.empty:
+        return actual_df
+    if actual_df.empty:
+        return supp.reset_index(drop=True)
+    db_dates = set(actual_df["date"].astype(str))
+    new_rows = supp[~supp["date"].isin(db_dates)]
+    if new_rows.empty:
+        return actual_df
+    return (
+        pd.concat([actual_df, new_rows], ignore_index=True)
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
+
 def get_actual_vs_predicted_until(
     end_date: Optional[str] = None,
     start_date: Optional[str] = None,
+    supplemental_prices: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     Compare stored actual prices with aggregated stored predictions up to end_date.
@@ -2246,6 +2279,10 @@ def get_actual_vs_predicted_until(
     Args:
         end_date: Optional YYYY-MM-DD end date. Defaults to today.
         start_date: Optional YYYY-MM-DD start date. Defaults to earliest available.
+        supplemental_prices: Optional DataFrame with 'date' and 'price' columns from
+            a live Yahoo Finance fetch.  These are merged with DB prices and fill any
+            gap caused by Turso replication lag or a missed price-sync run — rows from
+            the DB always win when a date exists in both sources.
 
     Returns:
         Dict with comparison rows and error summary metrics.
@@ -2306,9 +2343,6 @@ def get_actual_vs_predicted_until(
                 params=(start_str, cutoff_str, start_str, cutoff_str, start_str, cutoff_str),
             )
 
-        if actual_df.empty:
-            return _empty_comparison_payload(cutoff_date)
-
         if prediction_window_start is None:
             prediction_runs = _query_to_df(
                 conn,
@@ -2337,6 +2371,16 @@ def get_actual_vs_predicted_until(
             )
     finally:
         conn.close()
+
+    # Merge supplemental prices (e.g. live Yahoo fetch) so that dates not yet
+    # committed to Turso still appear in the comparison.  DB rows always win.
+    if supplemental_prices is not None and not supplemental_prices.empty:
+        actual_df = _merge_supplemental_prices(
+            actual_df, supplemental_prices, cutoff_date, start_bound
+        )
+
+    if actual_df.empty:
+        return _empty_comparison_payload(cutoff_date)
 
     actual_df["date"] = pd.to_datetime(actual_df["date"]).dt.date
 
