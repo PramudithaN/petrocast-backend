@@ -101,6 +101,9 @@ def _run_daily_scrape(target_date: str = None) -> Dict[str, Any]:
     try:
         from app.services.finbert_analyzer import get_finbert_timing
         result["finbert_timing"] = get_finbert_timing()
+        # Persist to DB so metrics survive server restarts
+        from app.database import save_finbert_timing
+        save_finbert_timing(result["finbert_timing"])
     except Exception:
         result["finbert_timing"] = None
 

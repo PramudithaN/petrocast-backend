@@ -544,10 +544,20 @@ def init_database() -> None:
     except Exception:
         pass  # Column already exists — safe to ignore
 
+    # Key-value store for persisting miscellaneous runtime state across restarts
+    # (e.g. FinBERT timing metrics from the last scraper run)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS kv_store (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
     logger.info(
-        "Database initialized successfully (sentiment, prices, articles, predictions, explanations)"
+        "Database initialized successfully (sentiment, prices, articles, predictions, explanations, kv_store)"
     )
 
 
@@ -1757,6 +1767,61 @@ def get_latest_locked_prediction() -> Optional[Dict[str, Any]]:
 def get_latest_prediction() -> Optional[Dict[str, Any]]:
     """Return the most recently stored prediction run."""
     return get_latest_locked_prediction()
+
+
+# ---------------------------------------------------------------------------
+# FinBERT timing persistence (kv_store)
+# ---------------------------------------------------------------------------
+
+def save_finbert_timing(timing: Dict[str, Any]) -> None:
+    """
+    Persist FinBERT timing metrics from the last scraper run to the database.
+
+    Stored as a JSON blob under the key 'finbert_timing' in kv_store so that
+    the data survives server restarts (e.g. Render free-tier hibernation).
+    """
+    import json
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO kv_store (key, value, updated_at)
+            VALUES ('finbert_timing', ?, CURRENT_TIMESTAMP)
+            """,
+            (json.dumps(timing),),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.warning("Could not persist FinBERT timing to DB: %s", e)
+    finally:
+        conn.close()
+
+
+def load_finbert_timing() -> Optional[Dict[str, Any]]:
+    """
+    Load the last persisted FinBERT timing metrics from the database.
+
+    Returns None if no timing has been stored yet.
+    """
+    import json
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT value FROM kv_store WHERE key = 'finbert_timing' LIMIT 1"
+        )
+        row = cursor.fetchone()
+        if row:
+            return json.loads(row[0])
+        return None
+    except Exception as e:
+        logger.warning("Could not load FinBERT timing from DB: %s", e)
+        return None
+    finally:
+        conn.close()
 
 
 def get_prediction_history(limit: int = 10) -> List[Dict[str, Any]]:

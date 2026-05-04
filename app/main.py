@@ -1673,9 +1673,25 @@ async def finbert_metrics():
     - last_inference_article_count: Number of articles processed in that run.
     - last_inference_total_seconds: Total inference time for all articles.
     - last_inference_per_article_seconds: Average per-article inference time.
+    - source: 'memory' if from the current process, 'database' if loaded after restart.
     """
-    from app.services.finbert_analyzer import get_finbert_timing
-    return await run_in_threadpool(get_finbert_timing)
+    def _get_timing():
+        from app.services.finbert_analyzer import get_finbert_timing
+        timing = get_finbert_timing()
+        # If all inference values are None the current process hasn't run FinBERT yet
+        # (e.g. after a server restart). Fall back to the last persisted values.
+        if timing.get("last_inference_run_at") is None:
+            from app.database import load_finbert_timing
+            db_timing = load_finbert_timing()
+            if db_timing:
+                db_timing["source"] = "database"
+                return db_timing
+            timing["source"] = "memory"
+            return timing
+        timing["source"] = "memory"
+        return timing
+
+    return await run_in_threadpool(_get_timing)
 
 
 @app.post(
