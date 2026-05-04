@@ -39,6 +39,7 @@ _timing: Dict[str, Any] = {
     "last_inference_article_count": None,
     "last_inference_total_seconds": None,
     "last_inference_per_article_seconds": None,
+    "last_inference_error": None,
 }
 
 
@@ -170,14 +171,22 @@ def analyze_batch_finbert(texts: List[str], batch_size: int = 16) -> List[float]
     if not texts:
         return []
 
+    _inference_start = time.perf_counter()
+
     try:
         model, tokenizer, device = load_sentiment_model()
     except Exception as e:
         logger.error(f"Cannot load model for batch analysis: {e}")
+        _elapsed = time.perf_counter() - _inference_start
+        _n = len(texts)
+        _timing["last_inference_run_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _timing["last_inference_article_count"] = _n
+        _timing["last_inference_total_seconds"] = round(_elapsed, 3)
+        _timing["last_inference_per_article_seconds"] = None
+        _timing["last_inference_error"] = str(e)
         return [0.0] * len(texts)
 
     all_scores = []
-    _inference_start = time.perf_counter()
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
@@ -220,6 +229,7 @@ def analyze_batch_finbert(texts: List[str], batch_size: int = 16) -> List[float]
     _timing["last_inference_article_count"] = _n
     _timing["last_inference_total_seconds"] = round(_inference_elapsed, 3)
     _timing["last_inference_per_article_seconds"] = round(_inference_elapsed / _n, 4) if _n else None
+    _timing["last_inference_error"] = None
 
     return all_scores
 
