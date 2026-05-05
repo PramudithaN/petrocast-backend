@@ -121,6 +121,12 @@ def _resolve_stable_close(
     exchange_tz = ZoneInfo(str(session["exchange_timezone"]))
     now_exchange = local_now.astimezone(exchange_tz)
     regular_end = session["regular_end"]
+    # Yahoo reports 23:59 ET for commodity futures (extended/overnight session).
+    # Daily OHLCV bars settle at the regular close (~16:00 ET), so clamp to 16:00
+    # when Yahoo returns an unreasonably late hour (>=20:00 in exchange timezone).
+    _re_exch = regular_end.astimezone(exchange_tz)
+    if _re_exch.hour >= 20:
+        regular_end = _re_exch.replace(hour=16, minute=0, second=0)
     stable_after = regular_end + timedelta(
         minutes=max(0, int(PREDICTION_CLOSE_LOCK_BUFFER_MINUTES))
     )

@@ -84,6 +84,13 @@ def get_canonical_prediction_date(
         return target_now.strftime("%Y-%m-%d")
 
     regular_end = session["regular_end"]
+    # Yahoo reports 23:59 ET for commodity futures (extended/overnight session).
+    # Daily OHLCV bars settle at the regular close (~16:00 ET), so clamp to 16:00
+    # when Yahoo returns an unreasonably late hour (>=20:00 in exchange timezone).
+    _exch_tz = ZoneInfo(str(session.get("exchange_timezone", "America/New_York")))
+    _re_exch = regular_end.astimezone(_exch_tz)
+    if _re_exch.hour >= 20:
+        regular_end = _re_exch.replace(hour=16, minute=0, second=0)
     stable_after_exchange = regular_end + timedelta(
         minutes=max(0, int(close_lock_buffer_minutes))
     )
